@@ -30,12 +30,11 @@ async function synthesizeSpeech(text: string): Promise<Buffer> {
         input: { text },
         voice: {
           languageCode: 'ja-JP',
-          name: 'ja-JP-Neural2-B',
-          ssmlGender: 'FEMALE',
+          name: 'ja-JP-Chirp3-HD-Aoede',
         },
         audioConfig: {
           audioEncoding: 'LINEAR16',
-          sampleRateHertz: 24000,
+          sampleRateHertz: 16000,
         },
       }),
     }
@@ -68,7 +67,7 @@ wss.on('connection', (clientWs) => {
     const audioBuffer = Buffer.concat(audioChunks);
     audioChunks = [];
 
-    if (audioBuffer.length < 24000) {
+    if (audioBuffer.length < 16000) {
       console.log('Audio too short, skipping');
       isProcessing = false;
       return;
@@ -78,7 +77,7 @@ wss.on('connection', (clientWs) => {
 
     try {
       // Convert PCM16 to WAV
-      const wavBuffer = pcm16ToWav(audioBuffer, 24000);
+      const wavBuffer = pcm16ToWav(audioBuffer, 16000);
 
       // Transcribe with AssemblyAI
       console.log('Sending to AssemblyAI...');
@@ -125,16 +124,10 @@ wss.on('connection', (clientWs) => {
       const audioContent = await synthesizeSpeech(aiText);
       console.log(`TTS audio generated: ${audioContent.length} bytes`);
 
-      // Send audio in chunks (skip WAV header - first 44 bytes)
+      // Send PCM audio data (skip WAV header - first 44 bytes)
       const pcmData = audioContent.slice(44);
-      const chunkSize = 4800; // 100ms at 24kHz
-
-      for (let i = 0; i < pcmData.length; i += chunkSize) {
-        const chunk = pcmData.slice(i, i + chunkSize);
-        const base64 = chunk.toString('base64');
-        clientWs.send(JSON.stringify({ type: 'audio', data: base64 }));
-      }
-
+      const base64 = pcmData.toString('base64');
+      clientWs.send(JSON.stringify({ type: 'audio', data: base64 }));
       clientWs.send(JSON.stringify({ type: 'audio_done' }));
 
     } catch (error: any) {

@@ -4,13 +4,14 @@
  */
 
 const CONFIG = {
-  sampleRate: 24000,
+  sampleRate: 16000,
   sendIntervalMs: 500,
 };
 
 const state = {
   ws: null,
   audioContext: null,
+  playbackContext: null,
   isConnected: false,
   isSpeaking: false,
   audioQueue: [],
@@ -97,16 +98,17 @@ function handleMessage(msg) {
     elements.aiResponse.textContent = msg.text;
     addTranscript('AI', msg.text);
   } else if (msg.type === 'audio') {
-    // Receive TTS audio chunk
+    // Receive TTS audio chunk - buffer until all chunks arrive
     state.isSpeaking = true;
     showIndicator('speaking');
     const audioData = base64ToBuffer(msg.data);
     state.audioQueue.push(audioData);
+  } else if (msg.type === 'audio_done') {
+    console.log('Audio stream complete');
+    // Play all buffered audio at once
     if (!state.isPlaying) {
       playNextAudio();
     }
-  } else if (msg.type === 'audio_done') {
-    console.log('Audio stream complete');
   } else if (msg.type === 'error') {
     console.error('Server error:', msg.message);
     showIndicator('listening');
@@ -180,13 +182,13 @@ async function playNextAudio() {
   state.isPlaying = true;
 
   try {
-    if (!state.audioContext) {
-      state.audioContext = new (window.AudioContext || window.webkitAudioContext)({
+    if (!state.playbackContext) {
+      state.playbackContext = new (window.AudioContext || window.webkitAudioContext)({
         sampleRate: CONFIG.sampleRate,
       });
     }
 
-    // Combine all queued audio
+    // Combine all queued PCM audio
     const allAudio = state.audioQueue.splice(0, state.audioQueue.length);
     let totalLength = 0;
     allAudio.forEach((a) => (totalLength += a.byteLength));
@@ -199,18 +201,18 @@ async function playNextAudio() {
       offset += arr.length;
     });
 
-    // Convert to Float32
+    // Convert Int16 PCM to Float32
     const float32 = new Float32Array(combined.length);
     for (let i = 0; i < combined.length; i++) {
       float32[i] = combined[i] / 32768;
     }
 
-    const buffer = state.audioContext.createBuffer(1, float32.length, CONFIG.sampleRate);
+    const buffer = state.playbackContext.createBuffer(1, float32.length, CONFIG.sampleRate);
     buffer.getChannelData(0).set(float32);
 
-    const source = state.audioContext.createBufferSource();
+    const source = state.playbackContext.createBufferSource();
     source.buffer = buffer;
-    source.connect(state.audioContext.destination);
+    source.connect(state.playbackContext.destination);
 
     source.onended = () => {
       console.log('Audio playback finished');

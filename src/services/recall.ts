@@ -33,6 +33,9 @@ export async function createBot(options: CreateBotOptions): Promise<Bot> {
   const requestBody: Record<string, unknown> = {
     meeting_url: options.meetingUrl,
     bot_name: options.botName || 'AI Assistant',
+    variant: {
+      google_meet: 'web_4_core',
+    },
     output_media: {
       camera: {
         kind: 'webpage',
