@@ -1,0 +1,256 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  color: #fff;
+  min-height: 100vh;
+  padding: 20px;
+}
+
+.container {
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.header {
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.avatar {
+  width: 80px;
+  height: 80px;
+  margin: 0 auto 15px;
+}
+
+.avatar svg {
+  width: 100%;
+  height: 100%;
+}
+
+h1 {
+  font-size: 24px;
+  font-weight: 600;
+}
+
+h2 {
+  font-size: 14px;
+  font-weight: 500;
+  color: #8892b0;
+  margin-bottom: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+/* Status */
+.status-container {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 30px;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ffd700;
+  animation: pulse 1.5s infinite;
+}
+
+.status.connected .status-dot {
+  background: #00ff88;
+  animation: none;
+}
+
+.status.error .status-dot {
+  background: #ff4444;
+  animation: none;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Activity Indicators */
+.activity-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 15px;
+  margin-bottom: 30px;
+  min-height: 60px;
+}
+
+.indicator {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 24px;
+  border-radius: 30px;
+  background: rgba(74, 144, 217, 0.2);
+  border: 1px solid rgba(74, 144, 217, 0.4);
+}
+
+.indicator.hidden {
+  display: none;
+}
+
+/* Sound Wave Animation */
+.sound-wave {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+}
+
+.sound-wave span {
+  width: 3px;
+  background: #4A90D9;
+  border-radius: 2px;
+  animation: soundWave 0.5s ease-in-out infinite;
+}
+
+.sound-wave span:nth-child(1) { animation-delay: 0s; height: 8px; }
+.sound-wave span:nth-child(2) { animation-delay: 0.1s; height: 16px; }
+.sound-wave span:nth-child(3) { animation-delay: 0.2s; height: 12px; }
+.sound-wave span:nth-child(4) { animation-delay: 0.3s; height: 18px; }
+.sound-wave span:nth-child(5) { animation-delay: 0.4s; height: 10px; }
+
+@keyframes soundWave {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.5); }
+}
+
+/* Thinking Dots */
+.thinking-dots {
+  display: flex;
+  gap: 4px;
+}
+
+.thinking-dots span {
+  width: 8px;
+  height: 8px;
+  background: #4A90D9;
+  border-radius: 50%;
+  animation: thinkingDot 1s ease-in-out infinite;
+}
+
+.thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes thinkingDot {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+/* Speaking Wave */
+.speaking-wave {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+}
+
+.speaking-wave span {
+  width: 4px;
+  height: 20px;
+  background: #00ff88;
+  border-radius: 2px;
+  animation: speakingWave 0.4s ease-in-out infinite alternate;
+}
+
+.speaking-wave span:nth-child(2) { animation-delay: 0.1s; }
+.speaking-wave span:nth-child(3) { animation-delay: 0.2s; }
+
+@keyframes speakingWave {
+  0% { transform: scaleY(0.3); }
+  100% { transform: scaleY(1); }
+}
+
+/* Transcript */
+.transcript-container {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+#transcript-list {
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.transcript-item {
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 14px;
+}
+
+.transcript-item:last-child {
+  border-bottom: none;
+}
+
+.transcript-speaker {
+  color: #4A90D9;
+  font-weight: 600;
+  margin-right: 8px;
+}
+
+.transcript-text {
+  color: #ccd6f6;
+}
+
+/* AI Response */
+.response-container {
+  background: rgba(74, 144, 217, 0.1);
+  border: 1px solid rgba(74, 144, 217, 0.3);
+  border-radius: 12px;
+  padding: 20px;
+}
+
+#ai-response {
+  font-size: 16px;
+  line-height: 1.6;
+  color: #e6f1ff;
+  min-height: 40px;
+}
+
+#ai-response:empty::before {
+  content: '質問をお待ちしています...';
+  color: #8892b0;
+  font-style: italic;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
