@@ -9,6 +9,11 @@ dist/
 .env.local
 .env.*.local
 
+# Service account keys
+*.credentials.json
+*-service-account.json
+agentspace-*.json
+
 # Logs
 logs/
 *.log

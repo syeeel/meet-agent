@@ -1,17 +1,17 @@
-import OpenAI from 'openai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import type { ChatMessage } from '../types';
 
-let openaiClient: OpenAI | null = null;
+let genaiClient: GoogleGenerativeAI | null = null;
 
-function getClient(): OpenAI {
-  if (!openaiClient) {
-    const apiKey = process.env.OPENAI_API_KEY;
+function getClient(): GoogleGenerativeAI {
+  if (!genaiClient) {
+    const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      throw new Error('OPENAI_API_KEY is not set');
+      throw new Error('GEMINI_API_KEY is not set');
     }
-    openaiClient = new OpenAI({ apiKey });
+    genaiClient = new GoogleGenerativeAI(apiKey);
   }
-  return openaiClient;
+  return genaiClient;
 }
 
 const SYSTEM_PROMPT = `あなたは会議に参加しているAIアシスタントです。
@@ -28,7 +28,7 @@ const SYSTEM_PROMPT = `あなたは会議に参加しているAIアシスタン�
 - 分からないことは正直に「分かりません」と答えてください`;
 
 /**
- * Generate a response to a transcript using GPT-4
+ * Generate a response to a transcript using Gemini 3 Flash
  */
 export async function generateResponse(
   transcript: string,
@@ -36,28 +36,32 @@ export async function generateResponse(
   speaker?: string
 ): Promise<{ response: string; tokensUsed: number }> {
   const client = getClient();
+  const model = client.getGenerativeModel({
+    model: 'gemini-2.5-flash-lite',
+    systemInstruction: {
+      role: 'user',
+      parts: [{ text: SYSTEM_PROMPT }],
+    },
+  });
 
   const userContent = speaker
     ? `[${speaker}]: ${transcript}`
     : transcript;
 
-  const messages: ChatMessage[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    ...conversationHistory,
-    { role: 'user', content: userContent },
-  ];
+  // Convert ChatMessage format to Gemini history format
+  const geminiHistory = conversationHistory.map((msg) => ({
+    role: msg.role === 'assistant' ? 'model' as const : 'user' as const,
+    parts: [{ text: msg.content }],
+  })).filter((msg) => msg.role === 'user' || msg.role === 'model');
 
-  const completion = await client.chat.completions.create({
-    model: process.env.OPENAI_MODEL || 'gpt-4',
-    messages,
-    max_tokens: 500,
-    temperature: 0.7,
+  const chat = model.startChat({
+    history: geminiHistory,
   });
 
-  const response = completion.choices[0]?.message?.content || '';
-  const tokensUsed = completion.usage?.total_tokens || 0;
+  const result = await chat.sendMessage(userContent);
+  const response = result.response.text() || '';
 
-  return { response, tokensUsed };
+  return { response, tokensUsed: 0 };
 }
 
 /**
@@ -81,19 +85,11 @@ export async function summarizeContent(
   maxLength: number = 200
 ): Promise<string> {
   const client = getClient();
+  const model = client.getGenerativeModel({ model: 'gemini-3-flash-preview' });
 
-  const completion = await client.chat.completions.create({
-    model: process.env.OPENAI_MODEL || 'gpt-4',
-    messages: [
-      {
-        role: 'system',
-        content: `以下の内容を${maxLength}文字以内で要約してください。重要なポイントを簡潔にまとめてください。`,
-      },
-      { role: 'user', content },
-    ],
-    max_tokens: 300,
-    temperature: 0.5,
-  });
+  const result = await model.generateContent(
+    `以下の内容を${maxLength}文字以内で要約してください。重要なポイントを簡潔にまとめてください。\n\n${content}`
+  );
 
-  return completion.choices[0]?.message?.content || '';
+  return result.response.text() || '';
 }

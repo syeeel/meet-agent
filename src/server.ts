@@ -2,7 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import path from 'path';
 import { createBot, getBot, listBots, removeBot, sendChatMessage } from './services/recall';
-import { generateResponse, shouldRespond } from './services/openai';
+import { generateResponse, shouldRespond } from './services/gemini';
 import type {
   CreateBotApiRequest,
   ChatApiRequest,

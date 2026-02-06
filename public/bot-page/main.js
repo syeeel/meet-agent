@@ -16,6 +16,7 @@ const state = {
   isSpeaking: false,
   audioQueue: [],
   isPlaying: false,
+  audioStreamDone: false,
 };
 
 const elements = {
@@ -97,18 +98,21 @@ function handleMessage(msg) {
   } else if (msg.type === 'response') {
     elements.aiResponse.textContent = msg.text;
     addTranscript('AI', msg.text);
+  } else if (msg.type === 'response_append') {
+    elements.aiResponse.textContent += msg.text;
   } else if (msg.type === 'audio') {
-    // Receive TTS audio chunk - buffer until all chunks arrive
+    // Receive TTS audio chunk - start playing immediately
     state.isSpeaking = true;
     showIndicator('speaking');
     const audioData = base64ToBuffer(msg.data);
     state.audioQueue.push(audioData);
-  } else if (msg.type === 'audio_done') {
-    console.log('Audio stream complete');
-    // Play all buffered audio at once
+    // Start playback as soon as first chunk arrives
     if (!state.isPlaying) {
       playNextAudio();
     }
+  } else if (msg.type === 'audio_done') {
+    console.log('Audio stream complete');
+    state.audioStreamDone = true;
   } else if (msg.type === 'error') {
     console.error('Server error:', msg.message);
     showIndicator('listening');
@@ -173,9 +177,16 @@ async function startAudioCapture() {
 
 async function playNextAudio() {
   if (state.audioQueue.length === 0) {
-    state.isPlaying = false;
-    state.isSpeaking = false;
-    showIndicator('listening');
+    // If audio_done received and queue empty, we're done speaking
+    if (state.audioStreamDone) {
+      state.isPlaying = false;
+      state.isSpeaking = false;
+      state.audioStreamDone = false;
+      showIndicator('listening');
+    } else {
+      // More audio chunks may still be coming, wait
+      state.isPlaying = false;
+    }
     return;
   }
 
@@ -188,23 +199,14 @@ async function playNextAudio() {
       });
     }
 
-    // Combine all queued PCM audio
-    const allAudio = state.audioQueue.splice(0, state.audioQueue.length);
-    let totalLength = 0;
-    allAudio.forEach((a) => (totalLength += a.byteLength));
-
-    const combined = new Int16Array(totalLength / 2);
-    let offset = 0;
-    allAudio.forEach((a) => {
-      const arr = new Int16Array(a);
-      combined.set(arr, offset);
-      offset += arr.length;
-    });
+    // Play one chunk at a time (each chunk = one sentence)
+    const audioData = state.audioQueue.shift();
+    const int16 = new Int16Array(audioData);
 
     // Convert Int16 PCM to Float32
-    const float32 = new Float32Array(combined.length);
-    for (let i = 0; i < combined.length; i++) {
-      float32[i] = combined[i] / 32768;
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+      float32[i] = int16[i] / 32768;
     }
 
     const buffer = state.playbackContext.createBuffer(1, float32.length, CONFIG.sampleRate);
@@ -215,18 +217,11 @@ async function playNextAudio() {
     source.connect(state.playbackContext.destination);
 
     source.onended = () => {
-      console.log('Audio playback finished');
-      // Check if more audio arrived
-      if (state.audioQueue.length > 0) {
-        playNextAudio();
-      } else {
-        state.isPlaying = false;
-        state.isSpeaking = false;
-        showIndicator('listening');
-      }
+      console.log('Sentence playback finished');
+      playNextAudio();
     };
 
-    console.log(`Playing audio: ${float32.length} samples`);
+    console.log(`Playing sentence: ${float32.length} samples`);
     source.start();
 
   } catch (error) {

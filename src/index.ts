@@ -3,16 +3,86 @@ dotenv.config();
 
 import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
-import OpenAI from 'openai';
-import { AssemblyAI } from 'assemblyai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleAuth } from 'google-auth-library';
 import app from './server';
 
 const PORT = process.env.PORT || 3000;
 const server = createServer(app);
 
-// Initialize clients
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const assemblyai = new AssemblyAI({ apiKey: process.env.ASSEMBLYAI_API_KEY || '' });
+// Initialize Gemini client
+const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+
+// Google Cloud STT V2 with service account (Chirp 2)
+const sttAuth = new GoogleAuth({
+  scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+});
+
+const STT_PROJECT_ID = process.env.GOOGLE_CLOUD_PROJECT_ID || '';
+const STT_LOCATION = 'asia-northeast1';
+
+// Cache access token to avoid re-fetching on every STT call (~100-200ms savings)
+let cachedAccessToken: string | null = null;
+let tokenExpiresAt = 0;
+
+async function getAccessToken(): Promise<string> {
+  const now = Date.now();
+  if (cachedAccessToken && now < tokenExpiresAt) {
+    return cachedAccessToken;
+  }
+  const client = await sttAuth.getClient();
+  const tokenResponse = await client.getAccessToken();
+  cachedAccessToken = tokenResponse.token || '';
+  // Refresh 60 seconds before expiry (tokens typically last 3600s)
+  tokenExpiresAt = now + 3500 * 1000;
+  console.log('Access token refreshed');
+  return cachedAccessToken;
+}
+
+async function transcribeSpeech(audioBuffer: Buffer): Promise<string> {
+  const accessToken = await getAccessToken();
+
+  // Wrap raw PCM in WAV header so autoDecodingConfig can detect the format
+  const wavBuffer = pcm16ToWav(audioBuffer, 16000);
+  const base64Audio = wavBuffer.toString('base64');
+
+  const response = await fetch(
+    `https://${STT_LOCATION}-speech.googleapis.com/v2/projects/${STT_PROJECT_ID}/locations/${STT_LOCATION}/recognizers/_:recognize`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({
+        config: {
+          autoDecodingConfig: {},
+          languageCodes: ['ja-JP'],
+          model: 'chirp_2',
+        },
+        content: base64Audio,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Google STT error: ${error}`);
+  }
+
+  const data = await response.json() as {
+    results?: Array<{
+      alternatives?: Array<{ transcript?: string }>;
+    }>;
+  };
+
+  const transcript = data.results
+    ?.map(r => r.alternatives?.[0]?.transcript || '')
+    .join('') || '';
+
+  console.log('STT response:', JSON.stringify(data).slice(0, 300));
+  return transcript.trim();
+}
 
 // Google Cloud TTS with API key
 async function synthesizeSpeech(text: string): Promise<Buffer> {
@@ -55,7 +125,7 @@ const wss = new WebSocketServer({ server, path: '/ws/audio' });
 wss.on('connection', (clientWs) => {
   console.log('Client connected');
 
-  let conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  let conversationHistory: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
   let audioChunks: Buffer[] = [];
   let isProcessing = false;
   let processTimeout: NodeJS.Timeout | null = null;
@@ -76,17 +146,10 @@ wss.on('connection', (clientWs) => {
     console.log(`Processing audio: ${audioBuffer.length} bytes`);
 
     try {
-      // Convert PCM16 to WAV
-      const wavBuffer = pcm16ToWav(audioBuffer, 16000);
+      // Transcribe with Google Cloud STT
+      console.log('Sending to Google STT...');
+      const userText = await transcribeSpeech(audioBuffer);
 
-      // Transcribe with AssemblyAI
-      console.log('Sending to AssemblyAI...');
-      const transcript = await assemblyai.transcripts.transcribe({
-        audio: wavBuffer,
-        language_code: 'ja',
-      });
-
-      const userText = transcript.text?.trim();
       if (!userText) {
         console.log('No speech detected');
         isProcessing = false;
@@ -96,39 +159,94 @@ wss.on('connection', (clientWs) => {
       console.log('User said:', userText);
       clientWs.send(JSON.stringify({ type: 'transcript', speaker: 'user', text: userText }));
 
-      // Generate response with GPT-4
-      conversationHistory.push({ role: 'user', content: userText });
-
-      const completion = await openai.chat.completions.create({
-        model: 'gpt-4',
-        messages: [
-          {
-            role: 'system',
-            content: `あなたは会議に参加しているAIアシスタントです。
+      // Generate response with Gemini 2.5 Flash Lite (streaming)
+      const model = genai.getGenerativeModel({
+        model: 'gemini-2.5-flash-lite',
+        systemInstruction: {
+          role: 'user',
+          parts: [{ text: `あなたは会議に参加しているAIアシスタントです。
 参加者からの質問に簡潔かつ的確に日本語で回答してください。
-回答は短く、20秒以内で話せる長さにしてください。`,
-          },
-          ...conversationHistory.slice(-10),
-        ],
-        max_tokens: 200,
+回答は短く、20秒以内で話せる長さにしてください。` }],
+        },
       });
 
-      const aiText = completion.choices[0]?.message?.content || 'すみません、応答できませんでした。';
-      console.log('AI response:', aiText);
+      // Ensure history starts with 'user' role
+      let history = conversationHistory.slice(-10);
+      while (history.length > 0 && history[0].role !== 'user') {
+        history = history.slice(1);
+      }
 
-      conversationHistory.push({ role: 'assistant', content: aiText });
-      clientWs.send(JSON.stringify({ type: 'response', text: aiText }));
+      const chat = model.startChat({ history });
 
-      // Generate speech with Google Cloud TTS
-      console.log('Generating speech with Google TTS...');
-      const audioContent = await synthesizeSpeech(aiText);
-      console.log(`TTS audio generated: ${audioContent.length} bytes`);
+      // Stream Gemini response and send TTS sentence-by-sentence
+      const streamResult = await chat.sendMessageStream(userText);
+      let sentenceBuffer = '';
+      let fullResponse = '';
+      let sentenceIndex = 0;
 
-      // Send PCM audio data (skip WAV header - first 44 bytes)
-      const pcmData = audioContent.slice(44);
-      const base64 = pcmData.toString('base64');
-      clientWs.send(JSON.stringify({ type: 'audio', data: base64 }));
+      for await (const chunk of streamResult.stream) {
+        const text = chunk.text();
+        if (!text) continue;
+        sentenceBuffer += text;
+        fullResponse += text;
+
+        // Detect sentence boundaries (Japanese punctuation)
+        const sentenceMatch = sentenceBuffer.match(/^(.*?[。！？\n])(.*)/s);
+        if (sentenceMatch) {
+          const sentence = sentenceMatch[1].trim();
+          sentenceBuffer = sentenceMatch[2];
+
+          if (sentence) {
+            sentenceIndex++;
+            console.log(`Sentence ${sentenceIndex}: "${sentence}"`);
+
+            // Send text immediately so client can display it
+            if (sentenceIndex === 1) {
+              clientWs.send(JSON.stringify({ type: 'response', text: sentence }));
+            } else {
+              clientWs.send(JSON.stringify({ type: 'response_append', text: sentence }));
+            }
+
+            // Generate and send TTS for this sentence immediately
+            const audioContent = await synthesizeSpeech(sentence);
+            const pcmData = audioContent.slice(44);
+            const base64 = pcmData.toString('base64');
+            clientWs.send(JSON.stringify({ type: 'audio', data: base64 }));
+          }
+        }
+      }
+
+      // Handle any remaining text after stream ends
+      if (sentenceBuffer.trim()) {
+        const sentence = sentenceBuffer.trim();
+        sentenceIndex++;
+        console.log(`Sentence ${sentenceIndex} (final): "${sentence}"`);
+
+        if (sentenceIndex === 1) {
+          clientWs.send(JSON.stringify({ type: 'response', text: sentence }));
+        } else {
+          clientWs.send(JSON.stringify({ type: 'response_append', text: sentence }));
+        }
+
+        const audioContent = await synthesizeSpeech(sentence);
+        const pcmData = audioContent.slice(44);
+        const base64 = pcmData.toString('base64');
+        clientWs.send(JSON.stringify({ type: 'audio', data: base64 }));
+      }
+
+      const aiText = fullResponse || 'すみません、応答できませんでした。';
+      console.log('AI full response:', aiText);
+
+      conversationHistory.push({ role: 'user', parts: [{ text: userText }] });
+      conversationHistory.push({ role: 'model', parts: [{ text: aiText }] });
       clientWs.send(JSON.stringify({ type: 'audio_done' }));
+
+      // Discard audio buffered during TTS playback (echo/self-hearing)
+      audioChunks = [];
+      if (processTimeout) {
+        clearTimeout(processTimeout);
+        processTimeout = null;
+      }
 
     } catch (error: any) {
       console.error('Error:', error.message || error);
@@ -156,7 +274,7 @@ wss.on('connection', (clientWs) => {
         if (processTimeout) clearTimeout(processTimeout);
 
         const totalBytes = audioChunks.reduce((sum, c) => sum + c.length, 0);
-        if (totalBytes > 240000) {
+        if (totalBytes > 320000) {
           processAudio();
         } else {
           processTimeout = setTimeout(processAudio, 2000);
@@ -205,11 +323,11 @@ server.listen(PORT, () => {
 ║           Meet Agent - AI Meeting Assistant                ║
 ╠════════════════════════════════════════════════════════════╣
 ║  Server running on port ${PORT}                               ║
-║  Using: AssemblyAI + GPT-4 + Google Cloud TTS              ║
+║  Using: Google STT + Gemini 2.5 Flash Lite + Google TTS   ║
 ╚════════════════════════════════════════════════════════════╝
   `);
 
-  const required = ['RECALL_API_KEY', 'OPENAI_API_KEY', 'ASSEMBLYAI_API_KEY', 'GOOGLE_CLOUD_API_KEY', 'BASE_URL'];
+  const required = ['RECALL_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_CLOUD_API_KEY', 'BASE_URL'];
   const missing = required.filter((v) => !process.env[v]);
   if (missing.length > 0) {
     console.warn(`⚠️  Missing: ${missing.join(', ')}`);
