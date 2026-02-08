@@ -9,12 +9,14 @@ body {
   background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
   color: #fff;
   min-height: 100vh;
-  padding: 20px;
+  overflow: hidden;
 }
 
+/* Fallback container */
 .container {
   max-width: 600px;
   margin: 0 auto;
+  padding: 20px;
 }
 
 .header {
@@ -61,6 +63,8 @@ h2 {
   padding: 8px 16px;
   border-radius: 20px;
   background: rgba(255, 255, 255, 0.1);
+  font-size: 14px;
+  color: #fff;
 }
 
 .status-dot {
@@ -74,6 +78,11 @@ h2 {
 .status.connected .status-dot {
   background: #00ff88;
   animation: none;
+}
+
+.status.speaking .status-dot {
+  background: #00ff88;
+  animation: pulse 0.8s infinite;
 }
 
 .status.error .status-dot {

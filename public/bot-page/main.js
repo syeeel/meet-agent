@@ -1,25 +1,38 @@
 /**
  * AI Meeting Assistant - Bot Page
- * Captures meeting audio and plays TTS responses
+ * Connects to LiveKit room to display Hedra avatar and publish meeting audio
  */
 
-const CONFIG = {
-  sampleRate: 24000,
-  sendIntervalMs: 500,
-};
+// ==================== URL Params ====================
+
+const urlParams = new URLSearchParams(window.location.search);
+const LK_URL = urlParams.get('lk_url');
+const LK_TOKEN = urlParams.get('lk_token');
+const ROOM_NAME = urlParams.get('room');
+const SESSION_TOKEN = urlParams.get('token');
+
+// Determine mode based on LiveKit credentials
+const isHedraMode = !!(LK_URL && LK_TOKEN);
+
+// ==================== State ====================
 
 const state = {
-  ws: null,
-  audioContext: null,
+  room: null,
   isConnected: false,
   isSpeaking: false,
-  audioQueue: [],
-  isPlaying: false,
+  localAudioTrack: null,
 };
 
-const elements = {
+// ==================== Elements ====================
+
+const els = {
+  avatarVideo: document.getElementById('avatar-video'),
+  avatarAudio: document.getElementById('avatar-audio'),
+  hedraOverlay: document.getElementById('hedra-overlay'),
+  hedraStatus: document.getElementById('hedra-status'),
+  fallbackContainer: document.getElementById('fallback-container'),
   connectionStatus: document.getElementById('connection-status'),
-  statusText: document.querySelector('.status-text'),
+  statusText: document.querySelector('#fallback-container .status-text'),
   listeningIndicator: document.getElementById('listening-indicator'),
   thinkingIndicator: document.getElementById('thinking-indicator'),
   speakingIndicator: document.getElementById('speaking-indicator'),
@@ -27,245 +40,198 @@ const elements = {
   aiResponse: document.getElementById('ai-response'),
 };
 
-// ==================== UI ====================
+// ==================== UI Helpers ====================
 
-function updateStatus(status, text) {
-  elements.connectionStatus.className = `status ${status}`;
-  elements.statusText.textContent = text;
+function updateHedraStatus(status, text) {
+  if (!els.hedraStatus) return;
+  els.hedraStatus.className = `status ${status}`;
+  const statusText = els.hedraStatus.querySelector('.status-text');
+  if (statusText) statusText.textContent = text;
+}
+
+function updateFallbackStatus(status, text) {
+  if (!els.connectionStatus) return;
+  els.connectionStatus.className = `status ${status}`;
+  if (els.statusText) els.statusText.textContent = text;
 }
 
 function showIndicator(name) {
   ['listening', 'thinking', 'speaking'].forEach((n) => {
-    elements[`${n}Indicator`].classList.toggle('hidden', n !== name);
+    const el = els[`${n}Indicator`];
+    if (el) el.classList.toggle('hidden', n !== name);
   });
 }
 
 function addTranscript(speaker, text) {
+  if (!els.transcriptList) return;
   const item = document.createElement('div');
   item.className = 'transcript-item';
   item.innerHTML = `<span class="transcript-speaker">${speaker}:</span><span class="transcript-text">${text}</span>`;
-  elements.transcriptList.appendChild(item);
-  while (elements.transcriptList.children.length > 10) {
-    elements.transcriptList.removeChild(elements.transcriptList.firstChild);
+  els.transcriptList.appendChild(item);
+  while (els.transcriptList.children.length > 10) {
+    els.transcriptList.removeChild(els.transcriptList.firstChild);
   }
-  elements.transcriptList.scrollTop = elements.transcriptList.scrollHeight;
+  els.transcriptList.scrollTop = els.transcriptList.scrollHeight;
 }
 
-// ==================== WebSocket ====================
+// ==================== LiveKit (Hedra Mode) ====================
 
-function connect() {
-  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = `${protocol}//${location.host}/ws/audio`;
-  console.log('Connecting to:', url);
+async function connectLiveKit() {
+  console.log('Connecting to LiveKit room:', ROOM_NAME);
+  console.log('LiveKit URL:', LK_URL);
 
-  state.ws = new WebSocket(url);
+  // Show Hedra UI, hide fallback
+  els.hedraOverlay.style.display = 'block';
+  els.fallbackContainer.style.display = 'none';
 
-  state.ws.onopen = () => {
-    console.log('WebSocket connected');
+  const { Room, RoomEvent, Track, VideoPresets } = LivekitClient;
+
+  const room = new Room({
+    adaptiveStream: false,  // Disable downscaling - we always want full quality avatar
+    dynacast: false,        // Disable dynamic codec switching for stable video
+    videoCaptureDefaults: {
+      resolution: VideoPresets.h720.resolution,
+    },
+  });
+
+  state.room = room;
+
+  // Handle remote tracks - ONLY from Hedra avatar participant
+  // Recall.ai captures the webpage's speaker output as the bot's microphone feed,
+  // so we MUST play avatar audio here for it to reach meeting participants.
+  // We filter by participant identity to avoid playing duplicate audio from
+  // the agent's own ParticipantAudioOutput track (if any).
+  room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+    console.log(`Track subscribed: ${track.kind} from ${participant.identity}`);
+
+    // Only attach tracks from the Hedra avatar agent
+    const isHedra = participant.identity && participant.identity.startsWith('hedra-avatar');
+    if (!isHedra) {
+      console.log(`Ignoring track from non-avatar participant: ${participant.identity}`);
+      return;
+    }
+
+    if (track.kind === Track.Kind.Video) {
+      track.attach(els.avatarVideo);
+      els.avatarVideo.style.display = 'block';
+      console.log('Hedra avatar video attached');
+    }
+
+    if (track.kind === Track.Kind.Audio) {
+      // Use a dedicated audio element to ensure clean playback
+      // Recall.ai captures this audio output as the bot's voice in the meeting
+      const audioEl = track.attach();
+      audioEl.volume = 1.0;
+      console.log('Hedra avatar audio attached');
+    }
+  });
+
+  room.on(RoomEvent.TrackUnsubscribed, (track) => {
+    track.detach();
+    console.log(`Track unsubscribed: ${track.kind}`);
+  });
+
+  // Monitor active speakers - mute mic while avatar speaks to prevent feedback
+  // The mic feed comes from Recall.ai (meeting audio). If we keep it publishing
+  // while the avatar audio plays through the speaker, the mic picks up the avatar's
+  // voice and sends it back to the agent, causing a feedback loop.
+  room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+    const avatarSpeaking = speakers.some(
+      (s) => s.identity && s.identity.startsWith('hedra-avatar')
+    );
+
+    if (avatarSpeaking && !state.isSpeaking) {
+      state.isSpeaking = true;
+      updateHedraStatus('speaking', '話しています...');
+      if (state.localAudioTrack) {
+        state.localAudioTrack.mute();
+      }
+    } else if (!avatarSpeaking && state.isSpeaking) {
+      state.isSpeaking = false;
+      updateHedraStatus('connected', '聞いています...');
+      // Short delay before unmuting to avoid capturing tail-end audio
+      if (state.localAudioTrack) {
+        setTimeout(() => {
+          if (state.localAudioTrack && !state.isSpeaking) {
+            state.localAudioTrack.unmute();
+          }
+        }, 800);
+      }
+    }
+  });
+
+  room.on(RoomEvent.Connected, () => {
+    console.log('Connected to LiveKit room');
     state.isConnected = true;
-    updateStatus('connected', '接続済み');
-    showIndicator('listening');
-    startAudioCapture();
-  };
+    updateHedraStatus('connected', '接続済み');
+  });
 
-  state.ws.onmessage = (event) => {
-    const msg = JSON.parse(event.data);
-    handleMessage(msg);
-  };
-
-  state.ws.onerror = (e) => {
-    console.error('WebSocket error:', e);
-    updateStatus('error', '接続エラー');
-  };
-
-  state.ws.onclose = () => {
+  room.on(RoomEvent.Disconnected, () => {
+    console.log('Disconnected from LiveKit room');
     state.isConnected = false;
-    updateStatus('connecting', '再接続中...');
-    setTimeout(connect, 3000);
-  };
+    updateHedraStatus('error', '切断されました');
+    // Attempt reconnect after delay
+    setTimeout(() => connectLiveKit(), 5000);
+  });
+
+  room.on(RoomEvent.DataReceived, (payload, participant) => {
+    try {
+      const text = new TextDecoder().decode(payload);
+      const msg = JSON.parse(text);
+      handleDataMessage(msg);
+    } catch (e) {
+      // Ignore non-JSON data
+    }
+  });
+
+  try {
+    await room.connect(LK_URL, LK_TOKEN);
+    console.log('LiveKit room connected');
+
+    // Publish local microphone to the room (for the agent to hear meeting audio)
+    const audioTrack = await LivekitClient.createLocalAudioTrack({
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    });
+    state.localAudioTrack = audioTrack;
+    await room.localParticipant.publishTrack(audioTrack);
+    console.log('Local audio track published');
+  } catch (err) {
+    console.error('Failed to connect to LiveKit:', err);
+    updateHedraStatus('error', '接続エラー');
+    // Fallback to SVG mode
+    els.hedraOverlay.style.display = 'none';
+    els.fallbackContainer.style.display = 'block';
+    updateFallbackStatus('error', 'LiveKit接続エラー - フォールバックモード');
+  }
 }
 
-function handleMessage(msg) {
-  console.log('Message:', msg.type);
-
+function handleDataMessage(msg) {
   if (msg.type === 'transcript') {
     addTranscript(msg.speaker === 'user' ? '参加者' : 'AI', msg.text);
-    if (msg.speaker === 'user') {
-      showIndicator('thinking');
-    }
   } else if (msg.type === 'response') {
-    elements.aiResponse.textContent = msg.text;
-    addTranscript('AI', msg.text);
-  } else if (msg.type === 'audio') {
-    // Receive TTS audio chunk
-    state.isSpeaking = true;
-    showIndicator('speaking');
-    const audioData = base64ToBuffer(msg.data);
-    state.audioQueue.push(audioData);
-    if (!state.isPlaying) {
-      playNextAudio();
-    }
-  } else if (msg.type === 'audio_done') {
-    console.log('Audio stream complete');
-  } else if (msg.type === 'error') {
-    console.error('Server error:', msg.message);
-    showIndicator('listening');
+    if (els.aiResponse) els.aiResponse.textContent = msg.text;
   }
 }
 
-// ==================== Audio Capture ====================
+// ==================== Fallback Mode (No LiveKit) ====================
 
-async function startAudioCapture() {
-  try {
-    console.log('Starting audio capture...');
-
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        sampleRate: CONFIG.sampleRate,
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-      },
-    });
-
-    console.log('Got audio stream');
-
-    state.audioContext = new (window.AudioContext || window.webkitAudioContext)({
-      sampleRate: CONFIG.sampleRate,
-    });
-
-    const source = state.audioContext.createMediaStreamSource(stream);
-    const processor = state.audioContext.createScriptProcessor(4096, 1, 1);
-
-    let audioBuffer = [];
-
-    processor.onaudioprocess = (e) => {
-      if (!state.isConnected || state.isSpeaking) return;
-
-      const data = e.inputBuffer.getChannelData(0);
-      const pcm16 = float32ToPcm16(data);
-      audioBuffer.push(...pcm16);
-    };
-
-    source.connect(processor);
-    processor.connect(state.audioContext.destination);
-
-    setInterval(() => {
-      if (audioBuffer.length > 0 && state.isConnected && !state.isSpeaking) {
-        const data = new Int16Array(audioBuffer);
-        audioBuffer = [];
-        const base64 = bufferToBase64(data.buffer);
-        state.ws.send(JSON.stringify({ type: 'audio', data: base64 }));
-      }
-    }, CONFIG.sendIntervalMs);
-
-    console.log('Audio capture started');
-
-  } catch (error) {
-    console.error('Audio capture failed:', error);
-    updateStatus('error', 'マイクエラー');
-  }
-}
-
-// ==================== Audio Playback ====================
-
-async function playNextAudio() {
-  if (state.audioQueue.length === 0) {
-    state.isPlaying = false;
-    state.isSpeaking = false;
-    showIndicator('listening');
-    return;
-  }
-
-  state.isPlaying = true;
-
-  try {
-    if (!state.audioContext) {
-      state.audioContext = new (window.AudioContext || window.webkitAudioContext)({
-        sampleRate: CONFIG.sampleRate,
-      });
-    }
-
-    // Combine all queued audio
-    const allAudio = state.audioQueue.splice(0, state.audioQueue.length);
-    let totalLength = 0;
-    allAudio.forEach((a) => (totalLength += a.byteLength));
-
-    const combined = new Int16Array(totalLength / 2);
-    let offset = 0;
-    allAudio.forEach((a) => {
-      const arr = new Int16Array(a);
-      combined.set(arr, offset);
-      offset += arr.length;
-    });
-
-    // Convert to Float32
-    const float32 = new Float32Array(combined.length);
-    for (let i = 0; i < combined.length; i++) {
-      float32[i] = combined[i] / 32768;
-    }
-
-    const buffer = state.audioContext.createBuffer(1, float32.length, CONFIG.sampleRate);
-    buffer.getChannelData(0).set(float32);
-
-    const source = state.audioContext.createBufferSource();
-    source.buffer = buffer;
-    source.connect(state.audioContext.destination);
-
-    source.onended = () => {
-      console.log('Audio playback finished');
-      // Check if more audio arrived
-      if (state.audioQueue.length > 0) {
-        playNextAudio();
-      } else {
-        state.isPlaying = false;
-        state.isSpeaking = false;
-        showIndicator('listening');
-      }
-    };
-
-    console.log(`Playing audio: ${float32.length} samples`);
-    source.start();
-
-  } catch (error) {
-    console.error('Playback error:', error);
-    state.isPlaying = false;
-    state.isSpeaking = false;
-    showIndicator('listening');
-  }
-}
-
-// ==================== Utilities ====================
-
-function float32ToPcm16(float32) {
-  const pcm16 = [];
-  for (let i = 0; i < float32.length; i++) {
-    const s = Math.max(-1, Math.min(1, float32[i]));
-    pcm16.push(s < 0 ? s * 0x8000 : s * 0x7fff);
-  }
-  return pcm16;
-}
-
-function bufferToBase64(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
-function base64ToBuffer(base64) {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes.buffer;
+function startFallbackMode() {
+  console.log('Starting in fallback mode (no LiveKit credentials)');
+  els.hedraOverlay.style.display = 'none';
+  els.fallbackContainer.style.display = 'block';
+  updateFallbackStatus('connected', '接続済み (フォールバックモード)');
+  showIndicator('listening');
 }
 
 // ==================== Init ====================
 
-console.log('Initializing...');
-updateStatus('connecting', '接続中...');
-connect();
+console.log('Bot page initializing...');
+console.log('Hedra mode:', isHedraMode);
+
+if (isHedraMode) {
+  connectLiveKit();
+} else {
+  startFallbackMode();
+}

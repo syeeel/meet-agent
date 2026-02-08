@@ -33,6 +33,13 @@ export async function createBot(options: CreateBotOptions): Promise<Bot> {
   const requestBody: Record<string, unknown> = {
     meeting_url: options.meetingUrl,
     bot_name: options.botName || 'AI Assistant',
+    // Use 4-core instances for WebRTC-heavy workloads (LiveKit + Hedra avatar)
+    // Default instances lack CPU for simultaneous WebRTC decode + render
+    variant: {
+      zoom: 'web_4_core',
+      google_meet: 'web_4_core',
+      microsoft_teams: 'web_4_core',
+    },
     output_media: {
       camera: {
         kind: 'webpage',

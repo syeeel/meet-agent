@@ -1,32 +1,36 @@
 {
   "name": "meet-agent",
-  "version": "1.0.0",
-  "description": "AI meeting agent using Recall.ai and OpenAI",
+  "version": "2.0.0",
+  "description": "AI meeting agent using Recall.ai, Hedra Avatar, and Google Gemini Live API",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts",
-    "dev:watch": "ts-node-dev --respawn src/index.ts"
+    "start": "node dist/index.js start",
+    "dev": "tsc && node dist/index.js dev",
+    "dev:watch": "tsc --watch & node dist/index.js dev",
+    "download-files": "node -e \"require('@livekit/agents-plugin-silero').VAD.load()\""
   },
   "keywords": [
     "meeting",
     "ai",
     "recall",
-    "openai",
+    "gemini",
+    "hedra",
+    "livekit",
     "bot"
   ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@google-cloud/text-to-speech": "^6.4.0",
-    "@types/ws": "^8.18.1",
-    "assemblyai": "^4.23.0",
+    "@livekit/agents": "1.0.42",
+    "@livekit/agents-plugin-google": "1.0.42",
+    "@livekit/agents-plugin-hedra": "1.0.42",
+    "@livekit/agents-plugin-silero": "1.0.42",
+    "@livekit/rtc-node": "^0.13.24",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.18.2",
-    "openai": "^4.28.0",
-    "ws": "^8.19.0"
+    "livekit-server-sdk": "^2.9.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

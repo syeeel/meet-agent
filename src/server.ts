@@ -1,14 +1,13 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import path from 'path';
+import { AccessToken } from 'livekit-server-sdk';
 import { createBot, getBot, listBots, removeBot, sendChatMessage } from './services/recall';
-import { generateResponse, shouldRespond } from './services/openai';
 import type {
   CreateBotApiRequest,
-  ChatApiRequest,
-  ChatApiResponse,
-  ApiErrorResponse,
   ChatMessage,
+  ApiErrorResponse,
+  BotSession,
 } from './types';
 
 const app = express();
@@ -18,10 +17,13 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
-// In-memory conversation storage (use Redis/DB in production)
+// In-memory conversation storage
 const conversations = new Map<string, ChatMessage[]>();
 
-// Store for SSE clients (to push transcripts to bot page)
+// Bot session tracking (botId -> session info)
+const botSessions = new Map<string, BotSession>();
+
+// Store for SSE clients
 const transcriptClients = new Map<string, Response[]>();
 
 // Error handler wrapper
@@ -31,6 +33,31 @@ function asyncHandler(
   return (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
   };
+}
+
+/**
+ * Generate a LiveKit access token for a participant
+ */
+async function createLiveKitToken(roomName: string, participantIdentity: string): Promise<string> {
+  const apiKey = process.env.LIVEKIT_API_KEY;
+  const apiSecret = process.env.LIVEKIT_API_SECRET;
+
+  if (!apiKey || !apiSecret) {
+    throw new Error('LIVEKIT_API_KEY and LIVEKIT_API_SECRET must be set');
+  }
+
+  const token = new AccessToken(apiKey, apiSecret, {
+    identity: participantIdentity,
+  });
+  token.addGrant({
+    room: roomName,
+    roomJoin: true,
+    canPublish: true,
+    canSubscribe: true,
+    canPublishData: true,
+  });
+
+  return await token.toJwt();
 }
 
 // Health check
@@ -50,19 +77,43 @@ app.post(
     }
 
     const baseUrl = process.env.BASE_URL;
+    const livekitUrl = process.env.LIVEKIT_URL;
     if (!baseUrl) {
       res.status(500).json({ error: 'BASE_URL is not configured' } as ApiErrorResponse);
       return;
     }
+    if (!livekitUrl) {
+      res.status(500).json({ error: 'LIVEKIT_URL is not configured' } as ApiErrorResponse);
+      return;
+    }
 
-    // Generate a session token for security
+    // Generate session token and LiveKit room
     const sessionToken = generateSessionToken();
-    const webpageUrl = `${baseUrl}/bot-page/index.html?token=${sessionToken}`;
+    const roomName = `meet-agent-${sessionToken}`;
+
+    // Generate LiveKit token for the bot-page participant
+    const livekitToken = await createLiveKitToken(roomName, `bot-page-${sessionToken}`);
+
+    // Build bot page URL with LiveKit connection params
+    const params = new URLSearchParams({
+      token: sessionToken,
+      lk_url: livekitUrl,
+      lk_token: livekitToken,
+      room: roomName,
+    });
+    const webpageUrl = `${baseUrl}/bot-page/index.html?${params.toString()}`;
 
     const bot = await createBot({
       meetingUrl,
       botName,
       webpageUrl,
+    });
+
+    // Store session info
+    botSessions.set(bot.id, {
+      botId: bot.id,
+      roomName,
+      sessionToken,
     });
 
     // Initialize conversation for this bot
@@ -71,6 +122,7 @@ app.post(
     res.json({
       ...bot,
       sessionToken,
+      roomName,
     });
   })
 );
@@ -97,8 +149,14 @@ app.get(
 app.post(
   '/api/bot/:id/leave',
   asyncHandler(async (req, res) => {
-    await removeBot(req.params.id);
-    conversations.delete(req.params.id);
+    const botId = req.params.id;
+
+    await removeBot(botId);
+
+    // Cleanup
+    conversations.delete(botId);
+    botSessions.delete(botId);
+
     res.json({ success: true });
   })
 );
@@ -117,54 +175,11 @@ app.post(
   })
 );
 
-// Process transcript and generate AI response
-app.post(
-  '/api/chat',
-  asyncHandler(async (req: Request<{}, {}, ChatApiRequest>, res) => {
-    const { transcript, speaker, context } = req.body;
-
-    if (!transcript) {
-      res.status(400).json({ error: 'transcript is required' } as ApiErrorResponse);
-      return;
-    }
-
-    // Use provided context or empty array
-    const conversationHistory = context || [];
-
-    const { response, tokensUsed } = await generateResponse(
-      transcript,
-      conversationHistory,
-      speaker
-    );
-
-    const result: ChatApiResponse = {
-      response,
-      tokens_used: tokensUsed,
-    };
-
-    res.json(result);
-  })
-);
-
-// Check if transcript should trigger a response
-app.post('/api/chat/should-respond', (req, res) => {
-  const { transcript, triggerWords } = req.body;
-
-  if (!transcript) {
-    res.status(400).json({ error: 'transcript is required' } as ApiErrorResponse);
-    return;
-  }
-
-  const should = shouldRespond(transcript, triggerWords);
-  res.json({ shouldRespond: should });
-});
-
 // Recall.ai webhook endpoint
 app.post('/api/webhook/recall', (req, res) => {
   const event = req.body;
   console.log('Recall.ai webhook event:', JSON.stringify(event, null, 2));
 
-  // Handle different event types
   switch (event.event) {
     case 'bot.status_change':
       console.log(`Bot ${event.data.bot_id} status changed to: ${event.data.status}`);
@@ -203,7 +218,6 @@ app.get('/api/transcript/stream', (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('Access-Control-Allow-Origin', '*');
 
-  // Add this client to the list
   if (!transcriptClients.has(token)) {
     transcriptClients.set(token, []);
   }
@@ -211,12 +225,10 @@ app.get('/api/transcript/stream', (req, res) => {
 
   console.log(`SSE client connected (token: ${token})`);
 
-  // Send a heartbeat every 30 seconds
   const heartbeat = setInterval(() => {
     res.write(': heartbeat\n\n');
   }, 30000);
 
-  // Remove client on disconnect
   req.on('close', () => {
     clearInterval(heartbeat);
     const clients = transcriptClients.get(token);
@@ -229,6 +241,38 @@ app.get('/api/transcript/stream', (req, res) => {
     console.log(`SSE client disconnected (token: ${token})`);
   });
 });
+
+// Test endpoint: join LiveKit room directly (no Recall.ai) to verify avatar quality
+app.get(
+  '/api/test/room',
+  asyncHandler(async (_req, res) => {
+    const livekitUrl = process.env.LIVEKIT_URL;
+    if (!livekitUrl) {
+      res.status(500).json({ error: 'LIVEKIT_URL is not configured' } as ApiErrorResponse);
+      return;
+    }
+
+    const sessionToken = generateSessionToken();
+    const roomName = `meet-agent-${sessionToken}`;
+    const identity = `test-viewer-${sessionToken}`;
+    const livekitToken = await createLiveKitToken(roomName, identity);
+
+    const params = new URLSearchParams({
+      token: sessionToken,
+      lk_url: livekitUrl,
+      lk_token: livekitToken,
+      room: roomName,
+    });
+
+    res.json({
+      roomName,
+      viewerUrl: `/bot-page/index.html?${params.toString()}`,
+      livekitUrl,
+      livekitToken,
+      identity,
+    });
+  })
+);
 
 // Error handling middleware
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {

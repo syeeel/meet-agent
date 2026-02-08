@@ -76,7 +76,7 @@ export interface TranscriptMessage {
   };
 }
 
-// OpenAI Types
+// Chat/LLM Types
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -109,4 +109,18 @@ export interface ChatApiResponse {
 export interface ApiErrorResponse {
   error: string;
   details?: string;
+}
+
+// LiveKit Types
+
+export interface LiveKitRoomInfo {
+  roomName: string;
+  url: string;
+  token: string;
+}
+
+export interface BotSession {
+  botId: string;
+  roomName: string;
+  sessionToken: string;
 }

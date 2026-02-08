@@ -33,3 +33,8 @@ coverage/
 # Temporary files
 tmp/
 temp/
+
+# GCP service account keys
+agentspace-458606-5554a3766854.json
+*.json.key
+*-credentials.json
