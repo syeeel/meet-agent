@@ -1,7 +1,9 @@
 /**
  * AI Meeting Assistant - Bot Page
- * Captures meeting audio and plays TTS responses
- * Supports HeyGen Streaming Avatar (LiveKit) with SVG fallback
+ * Supports HeyGen Interactive Avatar (SDK voice chat) with SVG fallback
+ *
+ * HeyGen mode: SDK handles session, STT, LLM, TTS, and avatar rendering
+ * Fallback mode: mic audio sent to server via WebSocket -> server handles STT/LLM/TTS
  */
 
 const CONFIG = {
@@ -9,12 +11,11 @@ const CONFIG = {
   sendIntervalMs: 500,
 };
 
-// Parse URL parameters for HeyGen LiveKit credentials
+// Parse URL parameters
 const urlParams = new URLSearchParams(window.location.search);
-const LK_URL = urlParams.get('lk_url');
-const LK_TOKEN = urlParams.get('lk_token');
 const SESSION_TOKEN = urlParams.get('token');
-const USE_HEYGEN = !!(LK_URL && LK_TOKEN);
+const HEYGEN_TOKEN = urlParams.get('heygen_token');
+const USE_HEYGEN = !!(HEYGEN_TOKEN && window.HeyGenSDK);
 
 const state = {
   ws: null,
@@ -25,8 +26,7 @@ const state = {
   audioQueue: [],
   isPlaying: false,
   audioStreamDone: false,
-  livekitRoom: null,
-  heygenGraceTimer: null,
+  avatar: null,
 };
 
 const elements = {
@@ -60,11 +60,9 @@ const STATUS_LABELS = {
 
 function updateStatus(status, text) {
   if (USE_HEYGEN) {
-    // HeyGen mode: update the top-right badge only
     elements.heygenBadge.className = `heygen-badge ${status}`;
     elements.heygenBadgeText.textContent = text || STATUS_LABELS[status] || status;
   } else {
-    // Fallback mode: update the full overlay
     elements.connectionStatus.className = `status ${status}`;
     elements.statusText.textContent = text || STATUS_LABELS[status] || status;
   }
@@ -72,10 +70,8 @@ function updateStatus(status, text) {
 
 function showIndicator(name) {
   if (USE_HEYGEN) {
-    // HeyGen mode: update badge text/state instead of showing indicator panels
     updateStatus(name, STATUS_LABELS[name]);
   } else {
-    // Fallback mode: toggle indicator panels
     ['listening', 'thinking', 'speaking'].forEach((n) => {
       elements[`${n}Indicator`].classList.toggle('hidden', n !== name);
     });
@@ -83,7 +79,6 @@ function showIndicator(name) {
 }
 
 function addTranscript(speaker, text) {
-  // In HeyGen mode, skip transcript UI (it's hidden)
   if (USE_HEYGEN) return;
 
   const item = document.createElement('div');
@@ -96,85 +91,126 @@ function addTranscript(speaker, text) {
   elements.transcriptList.scrollTop = elements.transcriptList.scrollHeight;
 }
 
-// ==================== HeyGen Avatar (LiveKit) ====================
+// ==================== HeyGen Interactive Avatar (SDK) ====================
 
-async function initHeyGenAvatar() {
+async function initHeyGenInteractiveAvatar() {
   if (!USE_HEYGEN) return false;
 
-  console.log('Initializing HeyGen avatar via LiveKit...');
-  console.log('LiveKit URL:', LK_URL);
+  const { StreamingAvatar, StreamingEvents, AvatarQuality } = window.HeyGenSDK;
+
+  console.log('Initializing HeyGen Interactive Avatar via SDK...');
 
   try {
-    const { Room, RoomEvent } = LivekitClient;
-    const room = new Room();
-    state.livekitRoom = room;
+    const avatar = new StreamingAvatar({ token: HEYGEN_TOKEN });
+    state.avatar = avatar;
 
-    // Handle tracks from the HeyGen avatar
-    room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
-      console.log(`Track subscribed: ${track.kind} from ${participant.identity}`);
-
-      if (track.kind === 'video') {
-        track.attach(elements.avatarVideo);
+    // Register event listeners
+    avatar.on(StreamingEvents.STREAM_READY, (event) => {
+      console.log('Stream ready:', event);
+      if (avatar.mediaStream) {
+        elements.avatarVideo.srcObject = avatar.mediaStream;
         elements.avatarVideo.classList.add('active');
         elements.fallbackContainer.classList.add('hidden');
-        console.log('Avatar video attached');
-      } else if (track.kind === 'audio') {
-        // Attach audio to a separate element so it plays through speakers
-        const audioEl = track.attach();
-        document.body.appendChild(audioEl);
-        console.log('Avatar audio attached');
       }
+      updateStatus('listening', '聞いています...');
+      showIndicator('listening');
     });
 
-    room.on(RoomEvent.TrackUnsubscribed, (track) => {
-      console.log(`Track unsubscribed: ${track.kind}`);
-      track.detach();
+    avatar.on(StreamingEvents.STREAM_DISCONNECTED, () => {
+      console.warn('Stream disconnected');
+      updateStatus('error', '切断されました');
     });
 
-    // Detect when the avatar actually stops speaking via ActiveSpeakersChanged.
-    // This fires with the list of currently speaking participants and is the
-    // most reliable way to know when audio output has truly ended.
-    room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
-      const avatarSpeaking = speakers.some(
-        (p) => p.identity !== room.localParticipant.identity
-      );
-      if (avatarSpeaking) {
-        state.isSpeaking = true;
-        showIndicator('speaking');
-        // Clear any pending grace timer – avatar is still talking
-        if (state.heygenGraceTimer) {
-          clearTimeout(state.heygenGraceTimer);
-          state.heygenGraceTimer = null;
-        }
-      } else if (state.isSpeaking) {
-        // Avatar stopped speaking – add short grace period for silence gap
-        // between sentences, then resume mic
-        if (!state.heygenGraceTimer) {
-          state.heygenGraceTimer = setTimeout(() => {
-            state.heygenGraceTimer = null;
-            state.isSpeaking = false;
-            showIndicator('listening');
-            console.log('Avatar stopped speaking, resuming mic');
-          }, 2000);
-        }
-      }
+    avatar.on(StreamingEvents.AVATAR_START_TALKING, () => {
+      console.log('Avatar started talking');
+      showIndicator('speaking');
     });
 
-    room.on(RoomEvent.Disconnected, () => {
-      console.warn('LiveKit disconnected');
+    avatar.on(StreamingEvents.AVATAR_STOP_TALKING, () => {
+      console.log('Avatar stopped talking');
+      showIndicator('listening');
     });
 
-    await room.connect(LK_URL, LK_TOKEN);
-    console.log('LiveKit room connected:', room.name);
+    avatar.on(StreamingEvents.USER_START, (event) => {
+      console.log('User started talking', JSON.stringify(event));
+      showIndicator('listening');
+    });
+
+    avatar.on(StreamingEvents.USER_STOP, (event) => {
+      console.log('User stopped talking', JSON.stringify(event));
+      showIndicator('thinking');
+    });
+
+    avatar.on(StreamingEvents.USER_SILENCE, (event) => {
+      console.log('User silence', JSON.stringify(event));
+    });
+
+    avatar.on(StreamingEvents.USER_TALKING_MESSAGE, (event) => {
+      console.log('User message:', event.message, JSON.stringify(event));
+    });
+
+    avatar.on(StreamingEvents.USER_END_MESSAGE, (event) => {
+      console.log('User final message:', event.message, JSON.stringify(event));
+    });
+
+    avatar.on(StreamingEvents.AVATAR_TALKING_MESSAGE, (event) => {
+      console.log('Avatar message:', event.message, JSON.stringify(event));
+    });
+
+    avatar.on(StreamingEvents.AVATAR_END_MESSAGE, (event) => {
+      console.log('Avatar final message:', event.message, JSON.stringify(event));
+    });
+
+    // Create and start avatar session
+    const avatarName = new URLSearchParams(window.location.search).get('avatar') || 'Wayne_20240711';
+
+    console.log('Creating avatar session...');
+    const sessionInfo = await avatar.createStartAvatar({
+      quality: AvatarQuality.High,
+      avatarName: avatarName,
+      knowledgeBase: `あなたは伊勢 誠（いせ まこと）という人物として会話してください。
+
+【プロフィール】
+- 45歳男性、千葉県船橋市在住
+- 妻（42歳・看護師）、長女（高校1年）、長男（中学1年）の4人家族
+- IT企業で20年の経験を持つビジネスコンサルタント。DX推進・業務改善が専門
+- 早稲田大学商学部卒業後、大手SIerを経て独立
+
+【性格・話し方】
+- 落ち着いた口調で、相手の話をよく聞いてから答える
+- 丁寧語を基本としつつ、親しみやすさも忘れない
+- 難しいことを分かりやすく例え話で説明するのが得意
+- 「なるほど」「いい質問ですね」など相槌を自然に入れる
+
+【趣味・関心】
+- 週末はロードバイクで房総半島を走るのが楽しみ
+- コーヒーにこだわりがあり、自家焙煎している
+- 読書好き。ビジネス書だけでなく歴史小説も好む（司馬遼太郎のファン）
+- 最近は長男と一緒にプログラミング（Python）を学んでいる
+
+【会話のルール】
+- 回答は短く、20秒以内で話せる長さにすること
+- 箇条書きや記号は使わず、自然な話し言葉で答えること
+- 分からないことは正直に「すみません、それはちょっと分からないですね」と答えること
+- プライベートの話題を振られたら、上記のペルソナに沿って自然に答えること`,
+      language: 'ja',
+    });
+
+    console.log('Avatar session created:', sessionInfo.session_id);
+
+    // Start voice chat - SDK handles mic capture, STT, LLM, and TTS internally
+    console.log('Starting voice chat...');
+    await avatar.startVoiceChat({ isInputAudioMuted: false });
+    console.log('Voice chat started');
+
     return true;
   } catch (error) {
-    console.error('HeyGen avatar init failed:', error);
+    console.error('HeyGen Interactive Avatar init failed:', error);
     return false;
   }
 }
 
 function activateHeyGenMode() {
-  // Show HeyGen badge, hide full overlay
   elements.heygenOverlay.classList.remove('hidden');
   elements.overlay.classList.add('hidden');
 }
@@ -182,110 +218,68 @@ function activateHeyGenMode() {
 function fallbackToSvg() {
   elements.avatarVideo.classList.remove('active');
   elements.fallbackContainer.classList.remove('hidden');
-  // Show full overlay, hide HeyGen badge
   elements.overlay.classList.remove('hidden');
   elements.heygenOverlay.classList.add('hidden');
   console.log('Using SVG fallback avatar');
 }
 
-// ==================== WebSocket ====================
+// ==================== Fallback: Server WebSocket ====================
 
-function connect() {
+function connectToServer() {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const url = `${protocol}//${location.host}/ws/audio`;
-  console.log('Connecting to:', url);
+  console.log('Connecting to server:', url);
 
   state.ws = new WebSocket(url);
 
   state.ws.onopen = () => {
-    console.log('WebSocket connected');
+    console.log('Server WebSocket connected');
     state.isConnected = true;
     updateStatus('connected', '接続済み');
     showIndicator('listening');
-
-    // Send init message with session token so server can link HeyGen session
-    if (SESSION_TOKEN) {
-      state.ws.send(JSON.stringify({ type: 'init', sessionToken: SESSION_TOKEN }));
-    }
-
     startAudioCapture();
   };
 
   state.ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
-    handleMessage(msg);
+    handleServerMessage(msg);
   };
 
   state.ws.onerror = (e) => {
-    console.error('WebSocket error:', e);
+    console.error('Server WebSocket error:', e);
     updateStatus('error', '接続エラー');
   };
 
   state.ws.onclose = () => {
     state.isConnected = false;
     updateStatus('connecting', '再接続中...');
-    setTimeout(connect, 3000);
+    setTimeout(connectToServer, 3000);
   };
 }
 
-function handleMessage(msg) {
+function handleServerMessage(msg) {
   console.log('Message:', msg.type);
 
   if (msg.type === 'transcript') {
     addTranscript(msg.speaker === 'user' ? '参加者' : 'AI', msg.text);
     if (msg.speaker === 'user') {
       showIndicator('thinking');
-      if (USE_HEYGEN) {
-        // Suppress mic while AI is processing + speaking
-        state.isSpeaking = true;
-      }
     }
   } else if (msg.type === 'response') {
-    if (!USE_HEYGEN) {
-      elements.aiResponse.textContent = msg.text;
-    }
+    elements.aiResponse.textContent = msg.text;
     addTranscript('AI', msg.text);
-    if (USE_HEYGEN) {
-      state.isSpeaking = true;
-      showIndicator('speaking');
-    }
   } else if (msg.type === 'response_append') {
-    if (!USE_HEYGEN) {
-      elements.aiResponse.textContent += msg.text;
-    }
+    elements.aiResponse.textContent += msg.text;
   } else if (msg.type === 'audio') {
-    // In HeyGen mode, audio comes via LiveKit - ignore WebSocket audio
-    if (USE_HEYGEN) return;
-
-    // Fallback: Receive TTS audio chunk - start playing immediately
     state.isSpeaking = true;
     showIndicator('speaking');
     const audioData = base64ToBuffer(msg.data);
     state.audioQueue.push(audioData);
-    // Start playback as soon as first chunk arrives
     if (!state.isPlaying) {
       playNextAudio();
     }
   } else if (msg.type === 'audio_done') {
     console.log('Audio stream complete');
-    if (USE_HEYGEN) {
-      // Server finished sending all tasks to HeyGen.
-      // The ActiveSpeakersChanged event will handle mic re-enable when
-      // avatar truly stops speaking. This is a safety fallback in case
-      // that event doesn't fire.
-      if (state.heygenGraceTimer) {
-        clearTimeout(state.heygenGraceTimer);
-      }
-      state.heygenGraceTimer = setTimeout(() => {
-        state.heygenGraceTimer = null;
-        if (state.isSpeaking) {
-          state.isSpeaking = false;
-          showIndicator('listening');
-          console.log('HeyGen fallback timer: resuming mic');
-        }
-      }, 15000);
-      return;
-    }
     state.audioStreamDone = true;
   } else if (msg.type === 'error') {
     console.error('Server error:', msg.message);
@@ -294,7 +288,7 @@ function handleMessage(msg) {
   }
 }
 
-// ==================== Audio Capture ====================
+// ==================== Audio Capture (Fallback only) ====================
 
 async function startAudioCapture() {
   try {
@@ -352,14 +346,12 @@ async function startAudioCapture() {
 
 async function playNextAudio() {
   if (state.audioQueue.length === 0) {
-    // If audio_done received and queue empty, we're done speaking
     if (state.audioStreamDone) {
       state.isPlaying = false;
       state.isSpeaking = false;
       state.audioStreamDone = false;
       showIndicator('listening');
     } else {
-      // More audio chunks may still be coming, wait
       state.isPlaying = false;
     }
     return;
@@ -374,11 +366,9 @@ async function playNextAudio() {
       });
     }
 
-    // Play one chunk at a time (each chunk = one sentence)
     const audioData = state.audioQueue.shift();
     const int16 = new Int16Array(audioData);
 
-    // Convert Int16 PCM to Float32
     const float32 = new Float32Array(int16.length);
     for (let i = 0; i < int16.length; i++) {
       float32[i] = int16[i] / 32768;
@@ -444,16 +434,20 @@ console.log('HeyGen mode:', USE_HEYGEN);
 (async () => {
   if (USE_HEYGEN) {
     updateStatus('connecting', '接続中...');
-    const success = await initHeyGenAvatar();
+    activateHeyGenMode();
+    const success = await initHeyGenInteractiveAvatar();
     if (success) {
-      activateHeyGenMode();
+      // HeyGen SDK handles everything - no server WebSocket needed
+      console.log('HeyGen Interactive Avatar ready');
     } else {
+      // HeyGen init failed, fall back to SVG + server pipeline
       fallbackToSvg();
+      connectToServer();
     }
   } else {
+    // No HeyGen: use SVG fallback + server audio pipeline
     fallbackToSvg();
     updateStatus('connecting', '接続中...');
+    connectToServer();
   }
-
-  connect();
 })();

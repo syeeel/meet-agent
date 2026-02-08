@@ -49,9 +49,36 @@ export async function createSessionToken(): Promise<string> {
 /** Create a new streaming session and get LiveKit credentials */
 export async function createSession(
   token: string,
-  avatarId?: string
+  options?: {
+    avatarId?: string;
+    knowledgeBase?: string;
+    voiceId?: string;
+    sttLanguage?: string;
+  }
 ): Promise<{ sessionId: string; livekitUrl: string; livekitToken: string }> {
-  const avatar = avatarId || process.env.HEYGEN_AVATAR_NAME || 'Wayne_20240711';
+  const avatar = options?.avatarId || process.env.HEYGEN_AVATAR_NAME || 'Wayne_20240711';
+
+  const body: Record<string, unknown> = {
+    version: 'v2',
+    avatar_id: avatar,
+    quality: 'high',
+  };
+
+  // Interactive Avatar: knowledge base (system prompt for built-in LLM)
+  if (options?.knowledgeBase) {
+    body.knowledge_base = options.knowledgeBase;
+  }
+
+  // Voice configuration
+  const voiceId = options?.voiceId || process.env.HEYGEN_VOICE_ID;
+  if (voiceId) {
+    body.voice = { voice_id: voiceId, rate: 1.0 };
+  }
+
+  // STT language for voice chat
+  if (options?.sttLanguage) {
+    body.stt_language = options.sttLanguage;
+  }
 
   const res = await fetch(`${HEYGEN_API_BASE}/v1/streaming.new`, {
     method: 'POST',
@@ -59,11 +86,7 @@ export async function createSession(
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${token}`,
     },
-    body: JSON.stringify({
-      version: 'v2',
-      avatar_id: avatar,
-      quality: 'high',
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {
@@ -167,6 +190,7 @@ async function sendKeepAlive(token: string, sessionId: string): Promise<void> {
  */
 export async function initializeSession(id: string): Promise<{
   sessionToken: string;
+  sessionId: string;
   livekitUrl: string;
   livekitToken: string;
 }> {
@@ -176,7 +200,34 @@ export async function initializeSession(id: string): Promise<{
   await destroyAllSessions();
 
   const token = await createSessionToken();
-  const { sessionId, livekitUrl, livekitToken } = await createSession(token);
+  const { sessionId, livekitUrl, livekitToken } = await createSession(token, {
+    knowledgeBase: `あなたは伊勢 誠（いせ まこと）という人物として会話してください。
+
+【プロフィール】
+- 45歳男性、千葉県船橋市在住
+- 妻（42歳・看護師）、長女（高校1年）、長男（中学1年）の4人家族
+- IT企業で20年の経験を持つビジネスコンサルタント。DX推進・業務改善が専門
+- 早稲田大学商学部卒業後、大手SIerを経て独立
+
+【性格・話し方】
+- 落ち着いた口調で、相手の話をよく聞いてから答える
+- 丁寧語を基本としつつ、親しみやすさも忘れない
+- 難しいことを分かりやすく例え話で説明するのが得意
+- 「なるほど」「いい質問ですね」など相槌を自然に入れる
+
+【趣味・関心】
+- 週末はロードバイクで房総半島を走るのが楽しみ
+- コーヒーにこだわりがあり、自家焙煎している
+- 読書好き。ビジネス書だけでなく歴史小説も好む（司馬遼太郎のファン）
+- 最近は長男と一緒にプログラミング（Python）を学んでいる
+
+【会話のルール】
+- 回答は短く、20秒以内で話せる長さにすること
+- 箇条書きや記号は使わず、自然な話し言葉で答えること
+- 分からないことは正直に「すみません、それはちょっと分からないですね」と答えること
+- プライベートの話題を振られたら、上記のペルソナに沿って自然に答えること`,
+    sttLanguage: 'ja',
+  });
 
   console.log(`[HeyGen] Session created: ${sessionId}`);
 
@@ -198,7 +249,7 @@ export async function initializeSession(id: string): Promise<{
 
   sessions.set(id, session);
 
-  return { sessionToken: token, livekitUrl, livekitToken };
+  return { sessionToken: token, sessionId, livekitUrl, livekitToken };
 }
 
 /** Destroy a session: stop streaming + clear keepalive */
