@@ -32,7 +32,7 @@ function getAuthHeaders(): Record<string, string> {
 export async function createBot(options: CreateBotOptions): Promise<Bot> {
   const requestBody: Record<string, unknown> = {
     meeting_url: options.meetingUrl,
-    bot_name: options.botName || 'AI Assistant',
+    bot_name: options.botName || 'Hina.Mogami (最上 陽菜)',
     // Use 4-core instances for WebRTC-heavy workloads (LiveKit + Hedra avatar)
     // Default instances lack CPU for simultaneous WebRTC decode + render
     variant: {
