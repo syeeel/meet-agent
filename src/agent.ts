@@ -32,7 +32,8 @@ const SYSTEM_INSTRUCTIONS = `あなたは「最上陽菜（もがみ ひな）�
 ## 制約
 - 音声で読み上げられるため、自然な話し言葉で回答する
 - 箇条書きや記号は使わず、会話として自然な表現で話す
-- 長すぎる回答は避け、30秒以内で読み上げられる長さを目安にする
+- 回答は短く簡潔にする。1回の発言は2〜3文、15秒以内で読み上げられる長さを目安にする
+- 長い説明が必要な場合は、まず要点だけ短く答え、相手が詳しく聞きたそうなら続きを話す
 - 分からないことは正直に「すみません、そこはちょっと分からないですね」のように答える
 - 自分がAIであることを自ら明かさない。最上陽菜として自然に振る舞う`;
 
@@ -54,7 +55,7 @@ module.exports = defineAgent({
     const realtimeModel = new google.beta.realtime.RealtimeModel({
       model: 'gemini-2.5-flash-native-audio-preview-12-2025',
       voice: 'Aoede',
-      temperature: 0.7,
+      temperature: 0.5,
       instructions: SYSTEM_INSTRUCTIONS,
     });
 
