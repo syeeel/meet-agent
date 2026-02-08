@@ -6,6 +6,7 @@ import { WebSocketServer } from 'ws';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { GoogleAuth } from 'google-auth-library';
 import app from './server';
+import { isHeyGenEnabled, getSessionByToken, sendTask as heygenSendTask, destroyAllSessions } from './services/heygen';
 
 const PORT = process.env.PORT || 3000;
 const server = createServer(app);
@@ -130,6 +131,11 @@ wss.on('connection', (clientWs) => {
   let isProcessing = false;
   let processTimeout: NodeJS.Timeout | null = null;
 
+  // HeyGen session state for this WebSocket connection
+  let heygenToken: string | null = null;
+  let heygenSessionId: string | null = null;
+  let isCoolingDown = false;
+
   const processAudio = async () => {
     if (audioChunks.length === 0 || isProcessing) return;
 
@@ -207,11 +213,16 @@ wss.on('connection', (clientWs) => {
               clientWs.send(JSON.stringify({ type: 'response_append', text: sentence }));
             }
 
-            // Generate and send TTS for this sentence immediately
-            const audioContent = await synthesizeSpeech(sentence);
-            const pcmData = audioContent.slice(44);
-            const base64 = pcmData.toString('base64');
-            clientWs.send(JSON.stringify({ type: 'audio', data: base64 }));
+            if (heygenToken && heygenSessionId) {
+              // HeyGen mode: send text to avatar for lip-synced speech
+              await heygenSendTask(heygenToken, heygenSessionId, sentence);
+            } else {
+              // Fallback: Google TTS
+              const audioContent = await synthesizeSpeech(sentence);
+              const pcmData = audioContent.slice(44);
+              const base64 = pcmData.toString('base64');
+              clientWs.send(JSON.stringify({ type: 'audio', data: base64 }));
+            }
           }
         }
       }
@@ -228,10 +239,14 @@ wss.on('connection', (clientWs) => {
           clientWs.send(JSON.stringify({ type: 'response_append', text: sentence }));
         }
 
-        const audioContent = await synthesizeSpeech(sentence);
-        const pcmData = audioContent.slice(44);
-        const base64 = pcmData.toString('base64');
-        clientWs.send(JSON.stringify({ type: 'audio', data: base64 }));
+        if (heygenToken && heygenSessionId) {
+          await heygenSendTask(heygenToken, heygenSessionId, sentence);
+        } else {
+          const audioContent = await synthesizeSpeech(sentence);
+          const pcmData = audioContent.slice(44);
+          const base64 = pcmData.toString('base64');
+          clientWs.send(JSON.stringify({ type: 'audio', data: base64 }));
+        }
       }
 
       const aiText = fullResponse || 'すみません、応答できませんでした。';
@@ -241,11 +256,30 @@ wss.on('connection', (clientWs) => {
       conversationHistory.push({ role: 'model', parts: [{ text: aiText }] });
       clientWs.send(JSON.stringify({ type: 'audio_done' }));
 
-      // Discard audio buffered during TTS playback (echo/self-hearing)
+      // Discard audio buffered during processing/playback (echo/self-hearing)
       audioChunks = [];
+      packetCount = 0;
       if (processTimeout) {
         clearTimeout(processTimeout);
         processTimeout = null;
+      }
+
+      // In HeyGen mode, the avatar is still speaking after we finish sending
+      // tasks. Keep discarding incoming audio for a cooldown period to prevent
+      // the avatar's own voice from being picked up and re-processed.
+      if (heygenToken && heygenSessionId) {
+        isCoolingDown = true;
+        console.log('[HeyGen] Cooldown started – discarding incoming audio');
+        setTimeout(() => {
+          isCoolingDown = false;
+          audioChunks = [];
+          packetCount = 0;
+          if (processTimeout) {
+            clearTimeout(processTimeout);
+            processTimeout = null;
+          }
+          console.log('[HeyGen] Cooldown ended – ready for new input');
+        }, 12000);
       }
 
     } catch (error: any) {
@@ -261,7 +295,24 @@ wss.on('connection', (clientWs) => {
     try {
       const message = JSON.parse(data.toString());
 
+      if (message.type === 'init') {
+        // Client sends its sessionToken so we can find the HeyGen session
+        const token = message.sessionToken;
+        if (token && isHeyGenEnabled()) {
+          const found = getSessionByToken(token);
+          if (found) {
+            heygenToken = found.session.token;
+            heygenSessionId = found.session.sessionId;
+            console.log(`[HeyGen] WebSocket linked to session ${heygenSessionId}`);
+          }
+        }
+        return;
+      }
+
       if (message.type === 'audio') {
+        // During HeyGen cooldown, silently discard all incoming audio
+        if (isCoolingDown) return;
+
         const audioData = Buffer.from(message.data, 'base64');
         audioChunks.push(audioData);
         packetCount++;
@@ -318,18 +369,37 @@ function pcm16ToWav(pcmData: Buffer, sampleRate: number): Buffer {
 }
 
 server.listen(PORT, () => {
+  const useHeyGen = isHeyGenEnabled();
+  const ttsLabel = useHeyGen ? 'HeyGen Avatar (lip-sync)' : 'Google TTS';
+
   console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║           Meet Agent - AI Meeting Assistant                ║
 ╠════════════════════════════════════════════════════════════╣
-║  Server running on port ${PORT}                               ║
-║  Using: Google STT + Gemini 2.5 Flash Lite + Google TTS   ║
+║  Server running on port ${String(PORT).padEnd(5)}                          ║
+║  STT:    Google STT (Chirp 2)                             ║
+║  LLM:    Gemini 2.5 Flash Lite                            ║
+║  TTS:    ${ttsLabel.padEnd(47)}║
 ╚════════════════════════════════════════════════════════════╝
   `);
 
-  const required = ['RECALL_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_CLOUD_API_KEY', 'BASE_URL'];
+  // HEYGEN_API_KEY makes GOOGLE_CLOUD_API_KEY optional (HeyGen handles TTS)
+  const required = ['RECALL_API_KEY', 'GEMINI_API_KEY', 'BASE_URL'];
+  if (!useHeyGen) {
+    required.push('GOOGLE_CLOUD_API_KEY');
+  }
   const missing = required.filter((v) => !process.env[v]);
   if (missing.length > 0) {
     console.warn(`⚠️  Missing: ${missing.join(', ')}`);
   }
 });
+
+// Graceful shutdown: clean up HeyGen sessions so they don't linger
+function gracefulShutdown(signal: string) {
+  console.log(`\n${signal} received – cleaning up...`);
+  destroyAllSessions().finally(() => {
+    process.exit(0);
+  });
+}
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));

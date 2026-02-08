@@ -3,6 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import { createBot, getBot, listBots, removeBot, sendChatMessage } from './services/recall';
 import { generateResponse, shouldRespond } from './services/gemini';
+import { isHeyGenEnabled, initializeSession, destroySession } from './services/heygen';
 import type {
   CreateBotApiRequest,
   ChatApiRequest,
@@ -23,6 +24,9 @@ const conversations = new Map<string, ChatMessage[]>();
 
 // Store for SSE clients (to push transcripts to bot page)
 const transcriptClients = new Map<string, Response[]>();
+
+// Bot ID → HeyGen session ID mapping
+const botHeyGenSessions = new Map<string, string>();
 
 // Error handler wrapper
 function asyncHandler(
@@ -57,13 +61,32 @@ app.post(
 
     // Generate a session token for security
     const sessionToken = generateSessionToken();
-    const webpageUrl = `${baseUrl}/bot-page/index.html?token=${sessionToken}`;
+    let webpageUrl = `${baseUrl}/bot-page/index.html?token=${sessionToken}`;
+
+    // Initialize HeyGen session if available
+    let heygenSessionToken: string | undefined;
+    if (isHeyGenEnabled()) {
+      try {
+        const heygen = await initializeSession(sessionToken);
+        heygenSessionToken = heygen.sessionToken;
+        // Append LiveKit credentials to bot page URL
+        webpageUrl += `&lk_url=${encodeURIComponent(heygen.livekitUrl)}&lk_token=${encodeURIComponent(heygen.livekitToken)}`;
+        console.log(`[HeyGen] Session initialized for bot, LiveKit URL: ${heygen.livekitUrl}`);
+      } catch (err) {
+        console.warn('[HeyGen] Failed to initialize session, falling back to SVG avatar:', err);
+      }
+    }
 
     const bot = await createBot({
       meetingUrl,
       botName,
       webpageUrl,
     });
+
+    // Map bot ID to HeyGen session for cleanup
+    if (heygenSessionToken) {
+      botHeyGenSessions.set(bot.id, sessionToken);
+    }
 
     // Initialize conversation for this bot
     conversations.set(bot.id, []);
@@ -97,6 +120,15 @@ app.get(
 app.post(
   '/api/bot/:id/leave',
   asyncHandler(async (req, res) => {
+    // Destroy HeyGen session if one exists for this bot
+    const heygenSessionId = botHeyGenSessions.get(req.params.id);
+    if (heygenSessionId) {
+      await destroySession(heygenSessionId).catch((err) =>
+        console.warn('[HeyGen] Error destroying session on leave:', err)
+      );
+      botHeyGenSessions.delete(req.params.id);
+    }
+
     await removeBot(req.params.id);
     conversations.delete(req.params.id);
     res.json({ success: true });
