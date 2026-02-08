@@ -5,9 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI Meeting Assistant</title>
   <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
 </head>
 <body>
-  <div class="container">
+  <!-- HeyGen Avatar Video (fullscreen background) -->
+  <video id="avatar-video" autoplay playsinline></video>
+
+  <!-- SVG Fallback Avatar (shown when HeyGen is not available) -->
+  <div id="fallback-container" class="container">
     <div class="header">
       <div class="avatar">
         <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
@@ -19,7 +24,18 @@
       </div>
       <h1>AI Assistant</h1>
     </div>
+  </div>
 
+  <!-- HeyGen mode: minimal status badge (top-right) -->
+  <div id="heygen-overlay" class="heygen-overlay hidden">
+    <div id="heygen-status-badge" class="heygen-badge connecting">
+      <span class="status-dot"></span>
+      <span class="heygen-badge-text">接続中...</span>
+    </div>
+  </div>
+
+  <!-- Fallback mode: full overlay UI (bottom) -->
+  <div id="overlay" class="overlay">
     <div class="status-container">
       <div id="connection-status" class="status connecting">
         <span class="status-dot"></span>

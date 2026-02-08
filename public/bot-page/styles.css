@@ -9,17 +9,44 @@ body {
   background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
   color: #fff;
   min-height: 100vh;
+  overflow: hidden;
+  position: relative;
+}
+
+/* ==================== Avatar Video (HeyGen) ==================== */
+
+#avatar-video {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  object-fit: cover;
+  z-index: 0;
+  background: #000;
+  display: none;
+}
+
+#avatar-video.active {
+  display: block;
+}
+
+/* ==================== SVG Fallback ==================== */
+
+#fallback-container {
+  position: relative;
+  z-index: 1;
   padding: 20px;
 }
 
-.container {
-  max-width: 600px;
-  margin: 0 auto;
+#fallback-container.hidden {
+  display: none;
 }
 
 .header {
   text-align: center;
   margin-bottom: 30px;
+  padding-top: 20px;
 }
 
 .avatar {
@@ -47,11 +74,86 @@ h2 {
   letter-spacing: 1px;
 }
 
-/* Status */
+/* ==================== HeyGen Overlay (top-right badge only) ==================== */
+
+.heygen-overlay {
+  position: fixed;
+  top: 32px;
+  right: 48px;
+  z-index: 20;
+}
+
+.heygen-overlay.hidden {
+  display: none;
+}
+
+.heygen-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 20px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  font-size: 14px;
+  color: #fff;
+}
+
+.heygen-badge.connected .status-dot {
+  background: #00ff88;
+  animation: none;
+}
+
+.heygen-badge.listening .status-dot {
+  background: #4A90D9;
+  animation: pulse 1.5s infinite;
+}
+
+.heygen-badge.thinking .status-dot {
+  background: #ffd700;
+  animation: pulse 1s infinite;
+}
+
+.heygen-badge.speaking .status-dot {
+  background: #00ff88;
+  animation: pulse 0.6s infinite;
+}
+
+.heygen-badge.error .status-dot {
+  background: #ff4444;
+  animation: none;
+}
+
+/* ==================== Fallback Overlay (bottom, full UI) ==================== */
+
+.overlay {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  padding: 16px;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-height: 60vh;
+}
+
+.overlay.hidden {
+  display: none;
+}
+
+.overlay > * {
+  pointer-events: auto;
+}
+
+/* ==================== Status ==================== */
+
 .status-container {
   display: flex;
   justify-content: center;
-  margin-bottom: 30px;
 }
 
 .status {
@@ -60,7 +162,8 @@ h2 {
   gap: 8px;
   padding: 8px 16px;
   border-radius: 20px;
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(8px);
 }
 
 .status-dot {
@@ -86,23 +189,24 @@ h2 {
   50% { opacity: 0.5; }
 }
 
-/* Activity Indicators */
+/* ==================== Activity Indicators ==================== */
+
 .activity-container {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 15px;
-  margin-bottom: 30px;
-  min-height: 60px;
+  gap: 10px;
+  min-height: 50px;
 }
 
 .indicator {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 24px;
+  padding: 10px 20px;
   border-radius: 30px;
-  background: rgba(74, 144, 217, 0.2);
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(8px);
   border: 1px solid rgba(74, 144, 217, 0.4);
 }
 
@@ -182,23 +286,26 @@ h2 {
   100% { transform: scaleY(1); }
 }
 
-/* Transcript */
+/* ==================== Transcript ==================== */
+
 .transcript-container {
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(8px);
   border-radius: 12px;
-  padding: 20px;
-  margin-bottom: 20px;
+  padding: 16px;
+  width: 100%;
+  max-width: 600px;
 }
 
 #transcript-list {
-  max-height: 150px;
+  max-height: 100px;
   overflow-y: auto;
 }
 
 .transcript-item {
-  padding: 10px 0;
+  padding: 8px 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .transcript-item:last-child {
@@ -215,19 +322,23 @@ h2 {
   color: #ccd6f6;
 }
 
-/* AI Response */
+/* ==================== AI Response ==================== */
+
 .response-container {
-  background: rgba(74, 144, 217, 0.1);
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(8px);
   border: 1px solid rgba(74, 144, 217, 0.3);
   border-radius: 12px;
-  padding: 20px;
+  padding: 16px;
+  width: 100%;
+  max-width: 600px;
 }
 
 #ai-response {
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1.6;
   color: #e6f1ff;
-  min-height: 40px;
+  min-height: 30px;
 }
 
 #ai-response:empty::before {
@@ -236,7 +347,8 @@ h2 {
   font-style: italic;
 }
 
-/* Scrollbar */
+/* ==================== Scrollbar ==================== */
+
 ::-webkit-scrollbar {
   width: 6px;
 }
