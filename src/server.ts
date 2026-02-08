@@ -3,7 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import { createBot, getBot, listBots, removeBot, sendChatMessage } from './services/recall';
 import { generateResponse, shouldRespond } from './services/gemini';
-import { isHeyGenEnabled, initializeSession, destroySession } from './services/heygen';
+import { isHeyGenEnabled, createSessionToken, destroySession } from './services/heygen';
 import type {
   CreateBotApiRequest,
   ChatApiRequest,
@@ -63,17 +63,15 @@ app.post(
     const sessionToken = generateSessionToken();
     let webpageUrl = `${baseUrl}/bot-page/index.html?token=${sessionToken}`;
 
-    // Initialize HeyGen session if available
-    let heygenSessionToken: string | undefined;
+    // Get HeyGen access token if available (SDK on bot page handles session creation)
+    let heygenAccessToken: string | undefined;
     if (isHeyGenEnabled()) {
       try {
-        const heygen = await initializeSession(sessionToken);
-        heygenSessionToken = heygen.sessionToken;
-        // Append LiveKit credentials to bot page URL
-        webpageUrl += `&lk_url=${encodeURIComponent(heygen.livekitUrl)}&lk_token=${encodeURIComponent(heygen.livekitToken)}`;
-        console.log(`[HeyGen] Session initialized for bot, LiveKit URL: ${heygen.livekitUrl}`);
+        heygenAccessToken = await createSessionToken();
+        webpageUrl += `&heygen_token=${encodeURIComponent(heygenAccessToken)}`;
+        console.log(`[HeyGen] Access token generated for bot page`);
       } catch (err) {
-        console.warn('[HeyGen] Failed to initialize session, falling back to SVG avatar:', err);
+        console.warn('[HeyGen] Failed to create access token, falling back to SVG avatar:', err);
       }
     }
 
@@ -83,8 +81,8 @@ app.post(
       webpageUrl,
     });
 
-    // Map bot ID to HeyGen session for cleanup
-    if (heygenSessionToken) {
+    // Map bot ID to session token for HeyGen cleanup
+    if (heygenAccessToken) {
       botHeyGenSessions.set(bot.id, sessionToken);
     }
 
